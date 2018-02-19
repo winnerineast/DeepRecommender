@@ -1,15 +1,11 @@
 # Copyright (c) 2017 NVIDIA Corporation
 import torch
 import argparse
+import copy
 from reco_encoder.data import input_layer
 from reco_encoder.model import model
-import torch.optim as optim
-import torch.nn as nn
 from torch.autograd import Variable
-import copy
-import time
 from pathlib import Path
-import numpy as np
 
 parser = argparse.ArgumentParser(description='RecoEncoder')
 
@@ -17,6 +13,8 @@ parser.add_argument('--drop_prob', type=float, default=0.0, metavar='N',
                     help='dropout drop probability')
 parser.add_argument('--constrained', action='store_true',
                     help='constrained autoencoder')
+parser.add_argument('--skip_last_layer_nl', action='store_true',
+                    help='if present, decoder\'s last layer will not apply non-linearity function')
 parser.add_argument('--hidden_layers', type=str, default="1024,512,512,128", metavar='N',
                     help='hidden layer sizes, comma-separated')
 parser.add_argument('--path_to_train_data', type=str, default="", metavar='N',
@@ -32,6 +30,12 @@ parser.add_argument('--predictions_path', type=str, default="out.txt", metavar='
 
 args = parser.parse_args()
 print(args)
+
+use_gpu = torch.cuda.is_available() # global flag
+if use_gpu:
+    print('GPU is available.') 
+else: 
+    print('GPU is not available.')
 
 def main():
   params = dict()
@@ -58,7 +62,8 @@ def main():
   rencoder = model.AutoEncoder(layer_sizes=[data_layer.vector_dim] + [int(l) for l in args.hidden_layers.split(',')],
                                nl_type=args.non_linearity_type,
                                is_constrained=args.constrained,
-                               dp_drop_prob=args.drop_prob)
+                               dp_drop_prob=args.drop_prob,
+                               last_layer_activations=not args.skip_last_layer_nl)
 
   path_to_model = Path(args.save_path)
   if path_to_model.is_file():
@@ -72,14 +77,15 @@ def main():
   print('######################################################')
   print('######################################################')
   rencoder.eval()
-  rencoder = rencoder.cuda()
+  if use_gpu: rencoder = rencoder.cuda()
+  
   inv_userIdMap = {v: k for k, v in data_layer.userIdMap.items()}
   inv_itemIdMap = {v: k for k, v in data_layer.itemIdMap.items()}
 
   eval_data_layer.src_data = data_layer.data
   with open(args.predictions_path, 'w') as outf:
     for i, ((out, src), majorInd) in enumerate(eval_data_layer.iterate_one_epoch_eval(for_inf=True)):
-      inputs = Variable(src.cuda().to_dense())
+      inputs = Variable(src.cuda().to_dense() if use_gpu else src.to_dense())
       targets_np = out.to_dense().numpy()[0, :]
       outputs = rencoder(inputs).cpu().data.numpy()[0, :]
       non_zeros = targets_np.nonzero()[0].tolist()

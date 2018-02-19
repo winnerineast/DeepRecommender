@@ -13,6 +13,7 @@ from pathlib import Path
 from logger import Logger
 from math import sqrt
 import numpy as np
+import os
 
 parser = argparse.ArgumentParser(description='RecoEncoder')
 parser.add_argument('--lr', type=float, default=0.00001, metavar='N',
@@ -31,9 +32,11 @@ parser.add_argument('--aug_step', type=int, default=-1, metavar='N',
                     help='do data augmentation every X step')
 parser.add_argument('--constrained', action='store_true',
                     help='constrained autoencoder')
+parser.add_argument('--skip_last_layer_nl', action='store_true',
+                    help='if present, decoder\'s last layer will not apply non-linearity function')
 parser.add_argument('--num_epochs', type=int, default=50, metavar='N',
                     help='maximum number of epochs')
-parser.add_argument('--optimizer', type=str, default="adam", metavar='N',
+parser.add_argument('--optimizer', type=str, default="momentum", metavar='N',
                     help='optimizer kind: adam, momentum, adagrad or rmsprop')
 parser.add_argument('--hidden_layers', type=str, default="1024,512,512,128", metavar='N',
                     help='hidden layer sizes, comma-separated')
@@ -51,13 +54,19 @@ parser.add_argument('--logdir', type=str, default="logs", metavar='N',
 args = parser.parse_args()
 print(args)
 
+use_gpu = torch.cuda.is_available() # global flag
+if use_gpu:
+    print('GPU is available.') 
+else: 
+    print('GPU is not available.')
+
 def do_eval(encoder, evaluation_data_layer):
   encoder.eval()
   denom = 0.0
   total_epoch_loss = 0.0
   for i, (eval, src) in enumerate(evaluation_data_layer.iterate_one_epoch_eval()):
-    inputs = Variable(src.cuda().to_dense())
-    targets = Variable(eval.cuda().to_dense())
+    inputs = Variable(src.cuda().to_dense() if use_gpu else src.to_dense())
+    targets = Variable(eval.cuda().to_dense() if use_gpu else eval.to_dense())
     outputs = encoder(inputs)
     loss, num_ratings = model.MSEloss(outputs, targets)
     total_epoch_loss += loss.data[0]
@@ -116,8 +125,9 @@ def main():
   rencoder = model.AutoEncoder(layer_sizes=[data_layer.vector_dim] + [int(l) for l in args.hidden_layers.split(',')],
                                nl_type=args.non_linearity_type,
                                is_constrained=args.constrained,
-                               dp_drop_prob=args.drop_prob)
-
+                               dp_drop_prob=args.drop_prob,
+                               last_layer_activations=not args.skip_last_layer_nl)
+  os.makedirs(args.logdir, exist_ok=True)
   model_checkpoint = args.logdir + "/model"
   path_to_model = Path(model_checkpoint)
   if path_to_model.is_file():
@@ -136,7 +146,8 @@ def main():
   if len(gpu_ids)>1:
     rencoder = nn.DataParallel(rencoder,
                                device_ids=gpu_ids)
-  rencoder = rencoder.cuda()
+  
+  if use_gpu: rencoder = rencoder.cuda()
 
   if args.optimizer == "adam":
     optimizer = optim.Adam(rencoder.parameters(),
@@ -174,7 +185,7 @@ def main():
     if args.optimizer == "momentum":
       scheduler.step()
     for i, mb in enumerate(data_layer.iterate_one_epoch()):
-      inputs = Variable(mb.cuda().to_dense())
+      inputs = Variable(mb.cuda().to_dense() if use_gpu else mb.to_dense())
       optimizer.zero_grad()
       outputs = rencoder(inputs)
       loss, num_ratings = model.MSEloss(outputs, inputs)
